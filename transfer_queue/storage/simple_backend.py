@@ -15,6 +15,7 @@
 
 import logging
 import os
+import subprocess
 import time
 import weakref
 from threading import Event, Thread
@@ -49,6 +50,20 @@ if not logger.hasHandlers():
 TQ_STORAGE_POLLER_TIMEOUT = int(os.environ.get("TQ_STORAGE_POLLER_TIMEOUT", 5))  # in seconds
 TQ_NUM_THREADS = int(os.environ.get("TQ_NUM_THREADS", 8))
 
+async def raise_vmmap(func: str, sleep_time = 5):
+    pid = os.getpid()
+    print(f"{pid=}中{func}，请看主控进程的内存占用")
+    output_file = os.path.expanduser(f"~/{func}.txt")
+    with open(output_file, "w", encoding="utf-8") as f:
+        subprocess.run(
+            ["vmmap", f"{pid}"],
+            check=True,
+            stdout=f,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    await asyncio.sleep(sleep_time)
 
 class StorageUnitData:
     """Storage unit for managing 2D data structure (samples × fields).
@@ -82,6 +97,8 @@ class StorageUnitData:
             dict with field names as keys, corresponding data list as values.
         """
         result: dict[str, list] = {}
+        uuid = uuid4().hex[:8]
+        raise_vmmap(f"{uuid}_StorageUnitData_before_get")
         for field in fields:
             if field not in self.field_data:
                 raise ValueError(
@@ -91,6 +108,7 @@ class StorageUnitData:
                 result[field] = [self.field_data[field][k] for k in global_indexes]
             except KeyError as e:
                 raise KeyError(f"StorageUnitData get_data: key {e} not found in field '{field}'") from e
+        raise_vmmap(f"{uuid}_StorageUnitData_after_get")
         return result
 
     def put_data(self, field_data: dict[str, Any], global_indexes: list) -> None:
@@ -171,6 +189,9 @@ class SimpleStorageUnit:
         self.put_get_socket: Optional[zmq.Socket] = None
         self.proxy_thread: Optional[Thread] = None
         self.worker_thread: Optional[Thread] = None
+
+        print(f"{self.storage_unit_id}: 进程号是 {os.getpid()}")
+        time.sleep(10)
 
         self._init_zmq_socket()
         self._start_process_put_get()
@@ -280,13 +301,15 @@ class SimpleStorageUnit:
 
             if worker_socket in socks:
                 # Messages received from proxy: [identity, serialized_msg_frame1, ...]
+                raise_vmmap(f"{self.storage_unit_id}_before_put_receive_data", 1)
                 messages = worker_socket.recv_multipart()
+                raise_vmmap(f"{self.storage_unit_id}_after_put_receive_data", 1)
                 identity = messages[0]
                 serialized_msg = messages[1:]
 
                 request_msg = ZMQMessage.deserialize(serialized_msg)
                 operation = request_msg.request_type
-
+                raise_vmmap(f"{self.storage_unit_id}_after_put_deserialize", 1)
                 try:
                     logger.debug(f"[{self.storage_unit_id}]: worker received operation: {operation}")
 
@@ -295,8 +318,10 @@ class SimpleStorageUnit:
                         with perf_monitor.measure(op_type="PUT_DATA"):
                             response_msg = self._handle_put(request_msg)
                     elif operation == ZMQRequestType.GET_DATA:  # type: ignore[arg-type]
+                        raise_vmmap(f"{self.storage_unit_id}_before_handle_get", 1)
                         with perf_monitor.measure(op_type="GET_DATA"):
                             response_msg = self._handle_get(request_msg)
+                        raise_vmmap(f"{self.storage_unit_id}_after_handle_get", 1)
                     elif operation == ZMQRequestType.CLEAR_DATA:  # type: ignore[arg-type]
                         with perf_monitor.measure(op_type="CLEAR_DATA"):
                             response_msg = self._handle_clear(request_msg)
@@ -418,6 +443,7 @@ class SimpleStorageUnit:
             Clear data success response ZMQMessage.
         """
         try:
+            raise_vmmap(f"{self.storage_unit_id}_before_clear_data", 1)
             global_indexes = data_parts.body["global_indexes"]
 
             with limit_pytorch_auto_parallel_threads(
@@ -439,6 +465,7 @@ class SimpleStorageUnit:
                     f"detail error message: {str(e)}"
                 },
             )
+        raise_vmmap(f"{self.storage_unit_id}_after_clear_data", 1)
         return response_msg
 
     @staticmethod
