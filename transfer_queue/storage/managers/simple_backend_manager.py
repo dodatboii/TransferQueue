@@ -16,7 +16,6 @@
 import asyncio
 import logging
 import os
-import subprocess
 import warnings
 from collections import defaultdict
 from collections.abc import Mapping
@@ -32,7 +31,7 @@ from omegaconf import DictConfig
 from tensordict import NonTensorStack, TensorDict
 
 from transfer_queue.metadata import BatchMeta
-from transfer_queue.storage.simple_backend import raise_vmmap
+from transfer_queue.storage.simple_backend import raise_pmap
 from transfer_queue.storage.managers.base import TransferQueueStorageManager
 from transfer_queue.storage.managers.factory import TransferQueueStorageManagerFactory
 from transfer_queue.utils.zmq_utils import (
@@ -258,7 +257,7 @@ class AsyncSimpleStorageManager(TransferQueueStorageManager):
         field_schema = self._extract_field_schema(data)
 
         routing = self._group_by_hash(metadata.global_indexes)
-        raise_vmmap("main_before_put")
+        raise_pmap("main_before_put")
         tasks = [
             self._put_to_single_storage_unit(
                 group.global_indexes,
@@ -279,7 +278,7 @@ class AsyncSimpleStorageManager(TransferQueueStorageManager):
                 f"error={type(e).__name__}: {e}"
             )
             raise
-        raise_vmmap("main_after_put")
+        raise_pmap("main_after_put")
 
         partition_id = metadata.partition_ids[0]
         await self.notify_data_update(
@@ -381,7 +380,7 @@ class AsyncSimpleStorageManager(TransferQueueStorageManager):
             return TensorDict({}, batch_size=0)
 
         routing = self._group_by_hash(metadata.global_indexes)
-        raise_vmmap("main_before_get")
+        raise_pmap("main_before_get")
         tasks = [
             self._get_from_single_storage_unit(group.global_indexes, metadata.field_names, target_storage_unit=su_id)
             for su_id, group in routing.items()
@@ -397,7 +396,7 @@ class AsyncSimpleStorageManager(TransferQueueStorageManager):
                 f"error={type(e).__name__}: {e}"
             )
             raise
-        raise_vmmap("main_after_get")
+        raise_pmap("main_after_get")
         # Scatter results directly to batch positions — no intermediate per-sample dict
         n = len(metadata.global_indexes)
         ordered_data: dict[str, list] = {field: [None] * n for field in metadata.field_names}
