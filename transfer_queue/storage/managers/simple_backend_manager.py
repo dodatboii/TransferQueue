@@ -266,6 +266,7 @@ class AsyncSimpleStorageManager(TransferQueueStorageManager):
             )
             for su_id, group in routing.items()
         ]
+        del data
 
         try:
             await asyncio.gather(*tasks)
@@ -286,6 +287,7 @@ class AsyncSimpleStorageManager(TransferQueueStorageManager):
             metadata.global_indexes,
             field_schema,
         )
+        del field_schema
 
     @dynamic_storage_manager_socket(socket_name="put_get_socket", timeout=TQ_SIMPLE_STORAGE_SEND_RECV_TIMEOUT)
     async def _put_to_single_storage_unit(
@@ -308,6 +310,8 @@ class AsyncSimpleStorageManager(TransferQueueStorageManager):
 
         try:
             data = request_msg.serialize()
+            del storage_data
+            del request_msg
             ####################################################################################
             pid = os.getpid()
             print(f"主控{pid=}中的put to single storage unit进程完成序列化开始sleep {TQ_SLEEP} 秒")
