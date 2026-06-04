@@ -68,7 +68,6 @@ async def mock_async_storage_manager():
         manager.config = config
         manager.controller_info = controller_info
         manager.storage_unit_infos = storage_unit_infos
-        manager.data_status_update_socket = None
         manager.controller_handshake_socket = None
         manager.zmq_context = None
 
@@ -257,7 +256,6 @@ async def test_get_data_routes_from_hash():
         manager.storage_manager_id = "test_get"
         manager.storage_unit_infos = storage_unit_infos
         manager.controller_info = None
-        manager.data_status_update_socket = None
         manager.controller_handshake_socket = None
         manager.zmq_context = None
 
@@ -310,7 +308,6 @@ async def test_clear_data_routes_from_hash():
         manager.storage_manager_id = "test_clear"
         manager.storage_unit_infos = storage_unit_infos
         manager.controller_info = None
-        manager.data_status_update_socket = None
         manager.controller_handshake_socket = None
         manager.zmq_context = None
 
@@ -361,7 +358,6 @@ async def test_hash_routing_stable_across_batch_sizes():
         manager.storage_manager_id = "test_hash_batch"
         manager.storage_unit_infos = storage_unit_infos
         manager.controller_info = None
-        manager.data_status_update_socket = None
         manager.controller_handshake_socket = None
         manager.zmq_context = None
 
@@ -422,7 +418,6 @@ async def test_hash_routing_stable_reversed_order():
         manager.storage_manager_id = "test_hash_order"
         manager.storage_unit_infos = storage_unit_infos
         manager.controller_info = None
-        manager.data_status_update_socket = None
         manager.controller_handshake_socket = None
         manager.zmq_context = None
 
