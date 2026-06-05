@@ -1790,6 +1790,36 @@ class TransferQueueController:
                         body={"metadata": metadata},
                     )
 
+            elif request_msg.request_type == ZMQRequestType.NOTIFY_DATA_UPDATE:
+                with monitor.measure(op_type="NOTIFY_DATA_UPDATE"):
+                    message_data = request_msg.body
+                    partition_id = message_data.get("partition_id")
+                    global_indexes = message_data.get("global_indexes", [])
+
+                    # Update production status
+                    success = self.update_production_status(
+                        partition_id=partition_id,
+                        global_indexes=global_indexes,
+                        field_schema=message_data.get("field_schema", {}),
+                        custom_backend_meta=message_data.get("custom_backend_meta", {}),
+                    )
+                    if success:
+                        if self._metrics is not None:
+                            self._metrics.record_samples("NOTIFY_DATA_UPDATE", len(global_indexes))
+                        logger.debug(f"[{self.controller_id}]: Updated production status for partition {partition_id}")
+
+                    # Send acknowledgment
+                    response_msg = ZMQMessage.create(
+                        request_type=ZMQRequestType.NOTIFY_DATA_UPDATE_ACK,
+                        sender_id=self.controller_id,
+                        receiver_id=request_msg.sender_id,
+                        body={
+                            "controller_id": self.controller_id,
+                            "partition_id": partition_id,
+                            "success": success,
+                        },
+                    )
+
             elif request_msg.request_type == ZMQRequestType.GET_PARTITION_META:
                 with monitor.measure(op_type="GET_PARTITION_META"):
                     params = request_msg.body
@@ -1999,36 +2029,6 @@ class TransferQueueController:
                         sender_id=self.controller_id,
                         receiver_id=request_msg.sender_id,
                         body={"partition_info": partition_info, "message": message},
-                    )
-
-            elif request_msg.request_type == ZMQRequestType.NOTIFY_DATA_UPDATE:
-                with monitor.measure(op_type="NOTIFY_DATA_UPDATE"):
-                    message_data = request_msg.body
-                    partition_id = message_data.get("partition_id")
-                    global_indexes = message_data.get("global_indexes", [])
-
-                    # Update production status
-                    success = self.update_production_status(
-                        partition_id=partition_id,
-                        global_indexes=global_indexes,
-                        field_schema=message_data.get("field_schema", {}),
-                        custom_backend_meta=message_data.get("custom_backend_meta", {}),
-                    )
-                    if success:
-                        if self._metrics is not None:
-                            self._metrics.record_samples("NOTIFY_DATA_UPDATE", len(global_indexes))
-                        logger.debug(f"[{self.controller_id}]: Updated production status for partition {partition_id}")
-
-                    # Send acknowledgment
-                    response_msg = ZMQMessage.create(
-                        request_type=ZMQRequestType.NOTIFY_DATA_UPDATE_ACK,
-                        sender_id=self.controller_id,
-                        receiver_id=request_msg.sender_id,
-                        body={
-                            "controller_id": self.controller_id,
-                            "partition_id": partition_id,
-                            "success": success,
-                        },
                     )
 
             self.request_handle_socket.send_multipart([identity, *response_msg.serialize()])
