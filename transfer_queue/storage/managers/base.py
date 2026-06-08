@@ -354,6 +354,7 @@ class StorageManager(ABC):
 
     def close(self) -> None:
         """Close all ZMQ sockets/contexts and stop the notify loop."""
+
         if self.controller_handshake_socket:
             try:
                 if not self.controller_handshake_socket.closed:
@@ -361,11 +362,9 @@ class StorageManager(ABC):
             except Exception as e:
                 logger.error(f"[{self.storage_manager_id}]: Error closing controller_handshake_socket: {str(e)}")
 
-        if not hasattr(self, "_notify_loop") or not self._notify_loop.is_running():
-            return
-
-        self._notify_loop.call_soon_threadsafe(self._notify_loop.stop)
-        self._notify_thread.join(timeout=5)
+        if hasattr(self, "_notify_loop") and self._notify_loop.is_running():
+            self._notify_loop.call_soon_threadsafe(self._notify_loop.stop)
+            self._notify_thread.join(timeout=5)
 
         self.zmq_context.term()
 
