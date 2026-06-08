@@ -303,7 +303,7 @@ class StorageManager(ABC):
         finally:
             try:
                 if not sock.closed:
-                    sock.close(linger=-1)
+                    sock.close(linger=0)
             except Exception:
                 pass
 
@@ -364,11 +364,15 @@ class StorageManager(ABC):
 
         if hasattr(self, "_notify_loop") and self._notify_loop.is_running():
             self._notify_loop.call_soon_threadsafe(self._notify_loop.stop)
-            self._notify_thread.join(timeout=5)
+
+        if hasattr(self, "_notify_thread") and self._notify_thread is not None:
+            self._notify_thread.join(timeout=5.0)
+            if self._notify_thread.is_alive():
+                logger.warning(f"[{self.storage_manager_id}]: Notify ZMQ thread did not stop within 5 second timeout.")
+            else:
+                logger.debug(f"[{self.storage_manager_id}]: Notify ZMQ thread shut down.")
 
         self.zmq_context.term()
-
-        logger.debug(f"[{self.storage_manager_id}]: Notify ZMQ thread shut down.")
 
     def __del__(self):
         """Destructor to ensure resources are cleaned up."""
