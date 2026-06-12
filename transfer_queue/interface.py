@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
+import shutil
 import subprocess
 import time
 from importlib import resources
+from pathlib import Path
 from typing import Any, Callable
 
 import ray
@@ -1047,3 +1050,198 @@ def get_client():
     """Get a TransferQueueClient for using low-level API"""
     assert _TQ_CLIENT is not None, "Please initialize the TransferQueue first by calling `tq.init()`!"
     return _TQ_CLIENT
+
+
+# ==================== Checkpoint API ====================
+
+_METADATA_FILE = "metadata.json"
+_CONTROLLER_FILE = "controller_state.pkl"
+_STORAGE_UNITS_DIR = "storage_units"
+
+
+def _su_filename(position: int, su_id: str) -> str:
+    return f"su_{position}_{su_id}.pkl"
+
+
+def save_checkpoint(
+    checkpoint_dir: str | Path,
+    *,
+    include_storage: bool = True,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Save a full checkpoint of the TransferQueue system state.
+
+    Args:
+        checkpoint_dir: Directory to save the checkpoint (created if not exists).
+        include_storage: Whether to include storage unit data.
+                         If False, only controller metadata is saved.
+        metadata: User-defined key-value pairs written into metadata.json.
+
+    Returns:
+        A dict containing checkpoint_dir, timestamp, version,
+        controller_state_size, storage_units, and total_size.
+
+    Raises:
+        RuntimeError: TransferQueue is not initialized.
+        OSError: Failed to write checkpoint files.
+    """
+    import transfer_queue
+
+    if _TQ_CONTROLLER is None:
+        raise RuntimeError("TransferQueue is not initialized. Call tq.init() first.")
+
+    checkpoint_dir = Path(checkpoint_dir)
+    tmp_dir = checkpoint_dir.parent / (checkpoint_dir.name + ".tmp")
+
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)
+
+    try:
+        # Step 1: controller dumps itself to file (must come before storage units, see design doc 5.2)
+        controller_path = tmp_dir / _CONTROLLER_FILE
+        success = ray.get(_TQ_CONTROLLER.dump_to_file.remote(str(controller_path)))
+        if not success:
+            raise RuntimeError("Controller failed to dump state to file")
+        controller_size = controller_path.stat().st_size
+        logger.info(f"Controller state saved ({controller_size} bytes)")
+
+        # Step 2: storage units dump themselves to files in parallel
+        su_info_list: list[dict[str, Any]] = []
+        if include_storage and _TQ_STORAGE and "SimpleStorage" in _TQ_STORAGE:
+            su_dir = tmp_dir / _STORAGE_UNITS_DIR
+            su_dir.mkdir()
+
+            su_handles: dict[str, Any] = _TQ_STORAGE["SimpleStorage"]
+
+            futures = {
+                su_id: (
+                    pos,
+                    su_dir / _su_filename(pos, su_id),
+                    su_handles[su_id].dump_to_file.remote(str(su_dir / _su_filename(pos, su_id))),
+                )
+                for pos, su_id in enumerate(su_handles)
+            }
+
+            all_success = ray.get([f for _, _, f in futures.values()])
+            for (su_id, (pos, path, _)), success in zip(futures.items(), all_success, strict=False):
+                if not success:
+                    raise RuntimeError(f"Storage unit {su_id} failed to dump to {path}")
+                su_info_list.append({"position": pos, "storage_unit_id": su_id, "file_size": path.stat().st_size})
+                logger.info(f"Storage unit {su_id} (pos={pos}) saved ({su_info_list[-1]['file_size']} bytes)")
+
+        # Step 3: write metadata.json
+        timestamp = time.time()
+        total_size = controller_size + sum(s["file_size"] for s in su_info_list)
+        meta_content = {
+            "version": transfer_queue.__version__,
+            "timestamp": timestamp,
+            "controller_state_size": controller_size,
+            "storage_units": su_info_list,
+            "total_size": total_size,
+            "user_metadata": metadata or {},
+        }
+        with open(tmp_dir / _METADATA_FILE, "w") as f:
+            json.dump(meta_content, f, indent=2)
+
+        # Step 4: atomic rename into final location
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir)
+        tmp_dir.rename(checkpoint_dir)
+
+        result = {
+            "checkpoint_dir": str(checkpoint_dir),
+            "timestamp": timestamp,
+            "version": transfer_queue.__version__,
+            "controller_state_size": controller_size,
+            "storage_units": su_info_list,
+            "total_size": total_size,
+        }
+        logger.info(f"Checkpoint saved to {checkpoint_dir} (total {total_size} bytes)")
+        return result
+
+    except Exception:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        raise
+
+
+def load_checkpoint(
+    checkpoint_dir: str | Path,
+) -> bool:
+    """Restore TransferQueue system state from a checkpoint.
+
+    The ordered storage unit list of the current system must exactly match the
+    checkpoint (same count, same IDs, same positions). This is required because
+    data routing is position-based (global_idx % num_units).
+
+    Args:
+        checkpoint_dir: Path to the checkpoint directory.
+
+    Returns:
+        True on success, False on failure.
+
+    Raises:
+        FileNotFoundError: Checkpoint directory or required files do not exist.
+        ValueError: Storage unit list does not match or checkpoint is corrupted.
+        RuntimeError: TransferQueue is not initialized.
+    """
+    if _TQ_CONTROLLER is None:
+        raise RuntimeError("TransferQueue is not initialized. Call tq.init() first.")
+
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
+
+    metadata_path = checkpoint_dir / _METADATA_FILE
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"{_METADATA_FILE} not found in {checkpoint_dir}")
+
+    with open(metadata_path) as f:
+        meta = json.load(f)
+
+    # Validate storage unit count before touching any state
+    saved_su_list = meta.get("storage_units", [])
+    if saved_su_list:
+        if not (_TQ_STORAGE and "SimpleStorage" in _TQ_STORAGE):
+            raise ValueError("Checkpoint contains storage unit data but current system has no SimpleStorage backend.")
+
+        current_su_handles = list(_TQ_STORAGE["SimpleStorage"].values())
+        if len(current_su_handles) != len(saved_su_list):
+            raise ValueError(
+                f"Storage unit count mismatch: checkpoint has {len(saved_su_list)}, "
+                f"current system has {len(current_su_handles)}."
+            )
+
+    # Restore controller
+    controller_path = checkpoint_dir / _CONTROLLER_FILE
+    if not controller_path.exists():
+        raise FileNotFoundError(f"{_CONTROLLER_FILE} not found in {checkpoint_dir}")
+
+    success = ray.get(_TQ_CONTROLLER.restore_from_file.remote(str(controller_path)))
+    if not success:
+        logger.error("Controller restore_from_file returned False")
+        return False
+
+    # Restore storage units in parallel, matched by position
+    if saved_su_list:
+        current_su_handles = list(_TQ_STORAGE["SimpleStorage"].values())
+        su_dir = checkpoint_dir / _STORAGE_UNITS_DIR
+
+        entries_by_pos = sorted(saved_su_list, key=lambda e: e["position"])
+        futures = []
+        for entry in entries_by_pos:
+            pos = entry["position"]
+            path = su_dir / _su_filename(pos, entry["storage_unit_id"])
+            if not path.exists():
+                raise FileNotFoundError(f"Storage unit file not found: {path}")
+            futures.append(current_su_handles[pos].restore_from_file.remote(str(path)))
+
+        results = ray.get(futures)
+        if not all(results):
+            failed_positions = [i for i, r in enumerate(results) if not r]
+            logger.error(f"Storage units at positions {failed_positions} failed to restore")
+            return False
+
+    logger.info(f"Checkpoint loaded from {checkpoint_dir}")
+    return True

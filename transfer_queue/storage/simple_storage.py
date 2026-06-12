@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import pickle
 import time
 import weakref
 from threading import Event, Thread
@@ -630,3 +631,65 @@ class SimpleStorageUnit:
             ZMQServerInfo containing connection details for this storage unit.
         """
         return self.zmq_server_info
+
+    def dump_to_file(self, path: str) -> bool:
+        """Serialize storage unit data directly to a file.
+
+        Writes data in-process to avoid transmitting the payload back over the
+        Ray object store — only a bool ACK is returned to the caller.
+
+        Args:
+            path: Absolute path for the output .pkl file. The caller must ensure
+                  this path is reachable from the node running this actor
+                  (shared filesystem required for multi-node setups).
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            state = {
+                "storage_unit_id": self.storage_unit_id,
+                "storage_unit_size": self.storage_unit_size,
+                "field_data": self.storage_data.field_data,
+                "active_keys": self.storage_data._active_keys,
+            }
+            with open(path, "wb") as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.info(f"[{self.storage_unit_id}]: dumped to {path}")
+            return True
+        except Exception as e:
+            logger.error(f"[{self.storage_unit_id}]: dump_to_file failed: {e}")
+            return False
+
+    def restore_from_file(self, path: str) -> bool:
+        """Restore storage unit data directly from a file.
+
+        Args:
+            path: Absolute path to a .pkl file previously written by dump_to_file().
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+
+            if data["storage_unit_size"] != self.storage_unit_size:
+                logger.warning(
+                    f"[{self.storage_unit_id}]: storage_unit_size mismatch — "
+                    f"checkpoint={data['storage_unit_size']}, current={self.storage_unit_size}"
+                )
+
+            self.storage_data.field_data.clear()
+            self.storage_data._active_keys.clear()
+            self.storage_data.field_data = data["field_data"]
+            self.storage_data._active_keys = data["active_keys"]
+
+            logger.info(
+                f"[{self.storage_unit_id}]: restored from {path} — "
+                f"{len(data['active_keys'])} keys, {len(data['field_data'])} fields"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[{self.storage_unit_id}]: restore_from_file failed: {e}")
+            return False

@@ -15,6 +15,7 @@
 
 import copy
 import os
+import pickle
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -2044,6 +2045,74 @@ class TransferQueueController:
     def get_config(self) -> DictConfig:
         """Retrieve the global config of TransferQueue."""
         return self.tq_config
+
+    # ==================== Checkpoint API ====================
+    def dump_to_file(self, path: str) -> bool:
+        """Serialize controller state directly to a file.
+
+        Writes in-process to avoid transmitting the payload back over the
+        Ray object store — only a bool ACK is returned to the caller.
+
+        Args:
+            path: Absolute path for the output .pkl file.
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            state = {
+                "controller_id": self.controller_id,
+                "partitions": {pid: p.to_snapshot() for pid, p in self.partitions.items()},
+                "index_manager": {
+                    "partition_to_indexes": dict(copy.deepcopy(self.index_manager.partition_to_indexes)),
+                    "reusable_indexes": list(self.index_manager.reusable_indexes),
+                    "global_index_counter": self.index_manager.global_index_counter,
+                    "allocated_indexes": set(self.index_manager.allocated_indexes),
+                },
+                "sampler": self.sampler.get_state() if hasattr(self.sampler, "get_state") else None,
+                "tq_config": self.tq_config,
+                "connected_storage_managers": set(self._connected_storage_managers),
+            }
+            with open(path, "wb") as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+            logger.info(f"[{self.controller_id}]: dumped to {path}")
+            return True
+        except Exception as e:
+            logger.error(f"[{self.controller_id}]: dump_to_file failed: {e}")
+            return False
+
+    def restore_from_file(self, path: str) -> bool:
+        """Restore controller state directly from a file.
+
+        Args:
+            path: Absolute path to a .pkl file previously written by dump_to_file().
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            with open(path, "rb") as f:
+                state = pickle.load(f)
+
+            self.controller_id = state["controller_id"]
+            self.partitions = state["partitions"]
+
+            im = state["index_manager"]
+            self.index_manager.partition_to_indexes = defaultdict(set, im["partition_to_indexes"])
+            self.index_manager.reusable_indexes = im["reusable_indexes"]
+            self.index_manager.global_index_counter = im["global_index_counter"]
+            self.index_manager.allocated_indexes = im["allocated_indexes"]
+
+            if state["sampler"] is not None and hasattr(self.sampler, "restore_state"):
+                self.sampler.restore_state(state["sampler"])
+            self.tq_config = state["tq_config"]
+            self._connected_storage_managers = state["connected_storage_managers"]
+
+            logger.info(f"[{self.controller_id}]: restored from {path}")
+            return True
+        except Exception as e:
+            logger.error(f"[{self.controller_id}]: restore_from_file failed: {e}")
+            return False
 
     def register_sampler(
         self,
