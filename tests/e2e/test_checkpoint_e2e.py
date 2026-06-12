@@ -102,6 +102,20 @@ def _get_batch(keys, partition_id):
     return tq.kv_batch_get(keys=keys, partition_id=partition_id)
 
 
+def assert_tensor_equal(tensor_a, tensor_b, msg=""):
+    """Assert two tensors are equal, handling nested vs dense comparisons."""
+    if (isinstance(tensor_a, torch.Tensor) and tensor_a.is_nested) or (
+        isinstance(tensor_b, torch.Tensor) and tensor_b.is_nested
+    ):
+        seq_a = list(tensor_a)
+        seq_b = list(tensor_b)
+        assert len(seq_a) == len(seq_b), f"{msg} Length mismatch: {len(seq_a)} vs {len(seq_b)}"
+        for t1, t2 in zip(seq_a, seq_b, strict=True):
+            assert torch.equal(t1, t2), f"{msg} Tensors are not equal: {tensor_a} vs {tensor_b}"
+    else:
+        assert torch.equal(tensor_a, tensor_b), f"{msg} Tensors are not equal: {tensor_a} vs {tensor_b}"
+
+
 # ---------------------------------------------------------------------------
 # basic save / load roundtrip
 # ---------------------------------------------------------------------------
@@ -188,8 +202,8 @@ class TestCheckpointRoundtrip:
         assert ok is True
 
         retrieved = _get_batch(keys, partition_id)
-        assert torch.equal(retrieved["input_ids"], input_ids)
-        assert torch.equal(retrieved["attention_mask"], attention_mask)
+        assert assert_tensor_equal(retrieved["input_ids"], input_ids)
+        assert assert_tensor_equal(retrieved["attention_mask"], attention_mask)
 
     def test_load_restores_multiple_partitions(self, tq_system, checkpoint_dir, controller):
         for i in range(3):
@@ -214,7 +228,7 @@ class TestCheckpointRoundtrip:
                 partition_id=f"part_{i}",
                 select_fields=["input_ids"],
             )
-            assert torch.equal(retrieved["input_ids"], torch.full((2, 4), i, dtype=torch.long))
+            assert assert_tensor_equal(retrieved["input_ids"], torch.full((2, 4), i, dtype=torch.long))
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +378,7 @@ class TestCheckpointDataVariety:
         tq.load_checkpoint(checkpoint_dir)
 
         retrieved = tq.kv_batch_get(keys=keys, partition_id=partition_id, select_fields=["input_ids"])
-        assert torch.equal(retrieved["input_ids"], torch.tensor([[1, 2], [3, 4]]))
+        assert assert_tensor_equal(retrieved["input_ids"], torch.tensor([[1, 2], [3, 4]]))
 
     def test_nested_tensor_fields_roundtrip(self, tq_system, checkpoint_dir, controller):
         """Variable-length (jagged) tensor fields should survive save/load."""
@@ -387,4 +401,4 @@ class TestCheckpointDataVariety:
 
         retrieved = tq.kv_batch_get(keys=keys, partition_id=partition_id, select_fields=["seq"])
         for i, component in enumerate(retrieved["seq"].unbind()):
-            assert torch.equal(component, torch.arange(i + 1, dtype=torch.float))
+            assert assert_tensor_equal(component, torch.arange(i + 1, dtype=torch.float))
