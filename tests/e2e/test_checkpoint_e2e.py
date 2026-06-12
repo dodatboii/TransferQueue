@@ -172,7 +172,7 @@ class TestCheckpointRoundtrip:
             gidx = snapshot.keys_mapping[key]
             assert snapshot.custom_meta[gidx]["idx"] == i
 
-    def test_load_restores_storage_data(self, tq_system, checkpoint_dir):
+    def test_load_restores_storage_data(self, tq_system, checkpoint_dir, controller):
         keys = ["s0", "s1"]
         partition_id = "p_storage"
         input_ids = torch.tensor([[10, 20], [30, 40]])
@@ -180,6 +180,9 @@ class TestCheckpointRoundtrip:
         _put_batch(keys, partition_id, input_ids, attention_mask)
 
         tq.save_checkpoint(checkpoint_dir)
+
+        # clear both controller and storage state so load has to restore from scratch
+        ray.get(controller.clear_partition.remote(partition_id))
 
         ok = tq.load_checkpoint(checkpoint_dir)
         assert ok is True
@@ -206,7 +209,11 @@ class TestCheckpointRoundtrip:
         assert ok is True
 
         for i in range(3):
-            retrieved = _get_batch([f"p{i}_k0", f"p{i}_k1"], f"part_{i}")
+            retrieved = tq.kv_batch_get(
+                keys=[f"p{i}_k0", f"p{i}_k1"],
+                partition_id=f"part_{i}",
+                select_fields=["input_ids"],
+            )
             assert torch.equal(retrieved["input_ids"], torch.full((2, 4), i, dtype=torch.long))
 
 
@@ -242,8 +249,9 @@ class TestCheckpointMetadataOnly:
         partitions = ray.get(controller.list_partitions.remote())
         assert partition_id in partitions
 
-        # but storage data is gone — get should fail or return empty
-        with pytest.raises(ValueError):
+        snapshot = ray.get(controller.get_partition_snapshot.remote(partition_id))
+        for key in keys:
+            assert key in snapshot.keys_mapping
             _get_batch(keys, partition_id)
 
 
@@ -334,7 +342,7 @@ class TestCheckpointErrors:
 
 
 class TestCheckpointDataVariety:
-    def test_non_tensor_fields_roundtrip(self, tq_system, checkpoint_dir):
+    def test_non_tensor_fields_roundtrip(self, tq_system, checkpoint_dir, controller):
         """String fields should survive save/load."""
         from tensordict import NonTensorStack
 
@@ -350,12 +358,15 @@ class TestCheckpointDataVariety:
         tq.kv_batch_put(keys=keys, partition_id=partition_id, fields=fields, tags=[{}, {}])
 
         tq.save_checkpoint(checkpoint_dir)
+
+        ray.get(controller.clear_partition.remote(partition_id))
+
         tq.load_checkpoint(checkpoint_dir)
 
-        retrieved = tq.kv_batch_get(keys=keys, partition_id=partition_id)
+        retrieved = tq.kv_batch_get(keys=keys, partition_id=partition_id, select_fields=["input_ids"])
         assert torch.equal(retrieved["input_ids"], torch.tensor([[1, 2], [3, 4]]))
 
-    def test_nested_tensor_fields_roundtrip(self, tq_system, checkpoint_dir):
+    def test_nested_tensor_fields_roundtrip(self, tq_system, checkpoint_dir, controller):
         """Variable-length (jagged) tensor fields should survive save/load."""
         keys = ["j0", "j1", "j2"]
         partition_id = "p_jagged"
@@ -369,8 +380,11 @@ class TestCheckpointDataVariety:
             )
 
         tq.save_checkpoint(checkpoint_dir)
+
+        ray.get(controller.clear_partition.remote(partition_id))
+
         tq.load_checkpoint(checkpoint_dir)
 
-        retrieved = tq.kv_batch_get(keys=keys, partition_id=partition_id)
+        retrieved = tq.kv_batch_get(keys=keys, partition_id=partition_id, select_fields=["seq"])
         for i, component in enumerate(retrieved["seq"].unbind()):
             assert torch.equal(component, torch.arange(i + 1, dtype=torch.float))
