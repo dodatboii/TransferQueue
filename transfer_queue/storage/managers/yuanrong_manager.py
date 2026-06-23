@@ -15,8 +15,12 @@
 
 from typing import Any
 
+from tensordict import TensorDict
+
+from transfer_queue.metadata import BatchMeta
 from transfer_queue.storage.managers.base import KVStorageManager, StorageManagerFactory
 from transfer_queue.utils.logging_utils import get_logger
+from transfer_queue.utils.perf_utils import IntervalPerfMonitor
 from transfer_queue.utils.zmq_utils import ZMQServerInfo
 
 logger = get_logger(__name__)
@@ -39,3 +43,16 @@ class YuanrongStorageManager(KVStorageManager):
         elif client_name != "YuanrongStorageClient":
             raise ValueError(f"Invalid 'client_name': {client_name} in config. Expecting 'YuanrongStorageClient'")
         super().__init__(controller_info, config)
+        self._perf_monitor = IntervalPerfMonitor(caller_name=self.storage_manager_id)
+
+    async def put_data(self, data: TensorDict, metadata: BatchMeta, data_parser=None) -> None:
+        with self._perf_monitor.measure("PUT_DATA"):
+            await super().put_data(data, metadata, data_parser)
+
+    async def get_data(self, metadata: BatchMeta) -> TensorDict:
+        with self._perf_monitor.measure("GET_DATA"):
+            return await super().get_data(metadata)
+
+    async def clear_data(self, metadata: BatchMeta) -> None:
+        with self._perf_monitor.measure("CLEAR_DATA"):
+            await super().clear_data(metadata)
