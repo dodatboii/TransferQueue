@@ -1083,6 +1083,14 @@ def load_checkpoint(
         raise RuntimeError("TransferQueue is not initialized. Call tq.init() first.")
 
     checkpoint_dir = Path(checkpoint_dir)
+    old_dir = checkpoint_dir.parent / f"{checkpoint_dir.name}.old"
+
+    if not checkpoint_dir.exists() and old_dir.exists():
+        # A prior save_checkpoint crashed between renaming checkpoint_dir aside
+        # and installing the new version; roll back to the pre-crash checkpoint.
+        logger.warning(f"Found interrupted checkpoint replacement; restoring {old_dir} to {checkpoint_dir}")
+        old_dir.rename(checkpoint_dir)
+
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
 
