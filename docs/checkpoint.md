@@ -101,40 +101,9 @@ checkpoint_dir/
 
 ## Atomic Checkpoint Replacement
 
-To ensure atomic checkpoint replacement, `save_checkpoint` uses a three-step process:
+`save_checkpoint` writes to `<checkpoint_dir>.tmp`, renames the existing `checkpoint_dir` to `<checkpoint_dir>.old`, renames `.tmp` into `checkpoint_dir`, then deletes `.old`. This keeps the old checkpoint recoverable until the new one is fully in place; a failure partway through restores `.old` automatically, and the directory stays a plain folder (no symlink).
 
-1. Write the new checkpoint to `<checkpoint_dir>.tmp`
-2. If `<checkpoint_dir>` exists, rename it to `<checkpoint_dir>.old`
-3. Rename `<checkpoint_dir>.tmp` to `<checkpoint_dir>`
-4. Delete `<checkpoint_dir>.old`
-
-**Example:**
-```
-# Before save
-/shared/checkpoints/experiment_1/  (old checkpoint)
-
-# During save
-/shared/checkpoints/experiment_1.tmp/  (new checkpoint being written)
-/shared/checkpoints/experiment_1/      (old checkpoint, still intact)
-
-# After step 2
-/shared/checkpoints/experiment_1.tmp/  (new checkpoint complete)
-/shared/checkpoints/experiment_1.old/  (old checkpoint moved aside)
-
-# After step 3
-/shared/checkpoints/experiment_1/      (new checkpoint in place)
-/shared/checkpoints/experiment_1.old/  (old checkpoint, about to be deleted)
-
-# Final state
-/shared/checkpoints/experiment_1/      (new checkpoint)
-```
-
-**Benefits:**
-- **Atomic replacement**: The old checkpoint is moved aside before the new one is moved into place. If step 3 fails, the `.old` version can be manually recovered.
-- **Backward compatible**: Directory structure unchanged; users see the same `checkpoint_dir` path.
-- **Automatic rollback**: If the rename fails after moving the old checkpoint aside, the exception handler automatically restores it.
-
-**Disk overhead**: During the save operation, disk usage is temporarily `2 × checkpoint_size` (both `.tmp` and `.old` exist briefly), but returns to `1 × checkpoint_size` after completion.
+POSIX `rename()` can't atomically swap two existing directories, so `checkpoint_dir` is briefly absent between the second and third steps. If the process crashes in that window, `load_checkpoint` detects the missing `checkpoint_dir` with a leftover `.old` and restores it automatically before loading. A concurrent `load_checkpoint` call landing in that same narrow window may see a transient `FileNotFoundError`.
 
 ## Architecture
 
