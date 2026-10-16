@@ -25,6 +25,9 @@ Key Components:
 - RankAwareSampler: Enables DP group coordination for consistent
   sampling across multiple ranks
 
+For local replay and partition switching, see docs/streaming_lifecycle.md.
+The reset/step example uses num_workers=0; this tutorial demonstrates workers.
+
 Use Cases:
 - Distributed training with multiple DP groups
 - Fine-grained micro-batch-level data retrieval

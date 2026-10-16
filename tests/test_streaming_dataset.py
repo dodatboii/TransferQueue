@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import Mock
+
+import pytest
 import torch
+from omegaconf import OmegaConf
 from tensordict import TensorDict
 
-from transfer_queue.dataloader.streaming_dataset import chunk_batch_fn
+from transfer_queue.dataloader.streaming_dataloader import StreamingDataLoader
+from transfer_queue.dataloader.streaming_dataset import StreamingDataset, chunk_batch_fn
 from transfer_queue.metadata import BatchMeta
 
 
@@ -67,3 +72,95 @@ def test_chunk_batch_fn_strided():
     assert chunks[1][0].batch_size == (1,)
     assert chunks[1][0]["a"].is_nested
     assert torch.equal(chunks[1][0]["a"][0], torch.tensor([[5, 6], [7, 8]]))
+
+
+@pytest.fixture(params=[False, True], ids=["dataset", "dataloader"])
+def replay_stream(request):
+    dataset = StreamingDataset(
+        config=OmegaConf.create({}),
+        batch_size=2,
+        micro_batch_size=1,
+        data_fields=["value"],
+        partition_id="round_1",
+        task_name="train",
+        dp_rank=0,
+    )
+    client = Mock()
+    client.get_data.side_effect = lambda meta: TensorDict(
+        {"value": torch.tensor(meta.global_indexes)}, batch_size=(meta.size,)
+    )
+    dataset._tq_client = client
+    stream = StreamingDataLoader(dataset, num_workers=0) if request.param else dataset
+    return dataset, stream, client
+
+
+def test_reset_replays_cached_batches_without_fetching(replay_stream):
+    dataset, stream, client = replay_stream
+    client.get_meta.side_effect = [
+        BatchMeta(global_indexes=[0, 1], partition_ids=["round_1"] * 2),
+        BatchMeta(global_indexes=[2, 3], partition_ids=["round_1"] * 2),
+    ]
+    iterator = iter(stream)
+    original = [next(iterator) for _ in range(4)]
+    del iterator
+
+    stream.reset()
+    iterator = iter(stream)
+    replayed = [next(iterator) for _ in range(4)]
+    del iterator
+
+    for (data, meta), (replay_data, replay_meta) in zip(original, replayed, strict=True):
+        assert torch.equal(data["value"], replay_data["value"])
+        assert meta.global_indexes == replay_meta.global_indexes
+    assert len(dataset.buffer) == 2
+    assert client.get_meta.call_count == 2
+    assert client.get_data.call_count == 2
+    client.reset_consumption.assert_not_called()
+
+
+def test_step_fetches_from_new_partition_at_batch_zero(replay_stream):
+    dataset, stream, client = replay_stream
+    client.get_meta.side_effect = [
+        BatchMeta(global_indexes=[0, 1], partition_ids=["round_1"] * 2),
+        BatchMeta(global_indexes=[2, 3], partition_ids=["round_2"] * 2),
+    ]
+    iterator = iter(stream)
+    next(iterator)
+    next(iterator)
+    del iterator
+
+    stream.step("round_2")
+    assert dataset.buffer == []
+    assert dataset.batch_index == 0
+    assert dataset.partition_id == "round_2"
+    iterator = iter(stream)
+    data, meta = next(iterator)
+    del iterator
+
+    assert data["value"].tolist() == [2]
+    assert meta.partition_ids == ["round_2"]
+    assert client.get_meta.call_args.kwargs["partition_id"] == "round_2"
+    assert client.get_meta.call_args.kwargs["sampling_config"]["batch_index"] == 0
+    assert [call[0] for call in client.mock_calls] == ["get_meta", "get_data", "get_meta", "get_data"]
+
+
+def test_finite_stream_can_replay_after_consumption_completes(replay_stream):
+    dataset, stream, client = replay_stream
+    dataset.should_check_consumption_status = True
+    client.check_consumption_status.return_value = False
+
+    def fetch_meta(**kwargs):
+        client.check_consumption_status.return_value = True
+        return BatchMeta(global_indexes=[0, 1], partition_ids=["round_1"] * 2)
+
+    client.get_meta.side_effect = fetch_meta
+    original = list(stream)
+    assert len(original) == 2
+    assert len(dataset.buffer) == 1
+
+    stream.reset()
+    replayed = list(stream)
+    assert [meta.global_indexes for _, meta in replayed] == [[0], [1]]
+    assert client.get_meta.call_count == 1
+    assert client.get_data.call_count == 1
+    client.reset_consumption.assert_not_called()

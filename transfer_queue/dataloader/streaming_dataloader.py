@@ -131,17 +131,24 @@ class StreamingDataLoader(torch.utils.data.DataLoader):
         )
 
     def reset(self):
-        """Reset the dataset iterator to the beginning.
+        """Rewind the local batch cursor to replay cached batches.
 
-        Clears the buffer and resets the batch index for a fresh iteration.
+        Keeps the buffer and controller consumption state unchanged. In streaming
+        mode, fetching resumes after the cached batches have been replayed.
+        Finish the current iteration before calling reset, then create a new iterator.
+        This updates the parent dataset only, not running worker copies; use
+        num_workers=0 for local replay through this method.
         """
         self.dataset.reset()
 
     def step(self, partition_id):
-        """Switch to a new partition and reset the dataset state.
+        """Drop the local replay buffer and start at batch zero in another partition.
 
-        This method clears the buffer, resets the batch index, and updates the partition_id
-        to fetch data from a different partition (e.g., switching from "train" to "val").
+        Does not clear remote payloads, consumption state, or sampler caches.
+        Finish the current iteration before calling step, then create a new iterator.
+        Reusing the same partition may retrieve old RankAwareSampler batch indexes.
+        This updates the parent dataset only, not running worker copies; use
+        num_workers=0 when switching partitions through this method.
 
         Args:
             partition_id: The new partition ID to switch to.
@@ -149,12 +156,12 @@ class StreamingDataLoader(torch.utils.data.DataLoader):
         self.dataset.step(partition_id)
 
     def get_buffer(self):
-        """Get the current buffer from the underlying dataset.
+        """Return the parent dataset's replay buffer, including already yielded batches.
 
-        Returns the batch buffer maintained by StreamingDataset, which stores
-        pre-fetched batches for efficient data access.
+        This is the actual list, not a copy or an aggregate of worker buffers.
+        Retaining it can keep old batches alive after step replaces the buffer.
 
         Returns:
-            list: Buffer containing pre-fetched (TensorDict, BatchMeta) tuples.
+            list: Cached full (TensorDict, BatchMeta) batches before micro-batch splitting.
         """
         return self.dataset.buffer

@@ -231,17 +231,16 @@ class StreamingDataset(IterableDataset):
                 raise
 
     def reset(self):
-        """Reset the dataset iterator to the beginning.
+        """Rewind the local batch cursor to replay cached batches.
 
-        Clears the buffer and resets the batch index for a fresh iteration.
+        Preserves the buffer and remote consumption state.
         """
         self.batch_index = 0
 
     def step(self, partition_id):
-        """Switch to a new partition and reset the dataset state.
+        """Drop the local replay buffer and start at batch zero in another partition.
 
-        This method clears the buffer, resets the batch index, and updates the partition_id
-        to fetch data from a different partition (e.g., switching from "train" to "val").
+        Remote data and sampler state are unchanged.
 
         Args:
             partition_id: The new partition ID to switch to.
